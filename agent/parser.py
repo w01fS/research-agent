@@ -1,30 +1,71 @@
+import json
 import re
+from dataclasses import dataclass
+from typing import Optional
 
-class ParseError(Exception):
-    pass
 
-def parse_llm_output(text: str):
-    thought_match = re.search(r"THOUGHT:(.*)", text)
-    action_match = re.search(r"ACTION:(.*)", text)
-    final_match = re.search(r"FINAL:(.*)", text)
-    observation_match = re.search(r"OBSERVATION:(.*)", text)
+@dataclass
+class ParsedOutput:
+    thought: str
+    action: Optional[dict] = None
+    final: Optional[str] = None
+    error: Optional[str] = None
 
-    if not thought_match:
-        raise ParseError("Missing THOUGHT")
 
-    if observation_match:
-        raise ParseError("LLM attempted to inject OBSERVATION")
+class OutputParser:
 
-    if action_match and final_match:
-        raise ParseError("Both ACTION and FINAL present")
+    def parse(self, raw: str) -> ParsedOutput:
+        thought = self._extract_section(raw, "THOUGHT") or ""
+        action_block = self._extract_json_block(raw)
+        final = self._extract_section(raw, "FINAL")
 
-    if not action_match and not final_match:
-        raise ParseError("Neither ACTION nor FINAL present")
+        if action_block and final:
+            return ParsedOutput(thought=thought, error="Both ACTION and FINAL present")
 
-    thought = thought_match.group(1).strip()
+        if not action_block and not final:
+            return ParsedOutput(thought=thought, error="Neither ACTION nor FINAL present")
 
-    return {
-        "thought": thought,
-        "action": action_match.group(1).strip() if action_match else None,
-        "final": final_match.group(1).strip() if final_match else None
-    }
+        if action_block:
+            try:
+                action_json = json.loads(action_block)
+            except json.JSONDecodeError:
+                return ParsedOutput(thought=thought, error="Malformed ACTION JSON")
+
+            # 🔒 Schema validation
+            if "tool" not in action_json:
+                return ParsedOutput(thought=thought, error="ACTION missing 'tool' field")
+
+            if "input" not in action_json:
+                return ParsedOutput(thought=thought, error="ACTION missing 'input' field")
+
+            if not isinstance(action_json["input"], dict):
+                return ParsedOutput(thought=thought, error="'input' must be a dict")
+
+            return ParsedOutput(thought=thought, action=action_json)
+
+        return ParsedOutput(thought=thought, final=(final or "").strip())
+
+    def _extract_section(self, raw: str, section: str) -> Optional[str]:
+        pattern = rf"{section}:(.*?)(?:\n[A-Z]+:|\Z)"
+        match = re.search(pattern, raw, re.DOTALL)
+        return match.group(1).strip() if match else None
+
+    def _extract_json_block(self, raw: str) -> Optional[str]:
+        action_start = raw.find("ACTION:")
+        if action_start == -1:
+            return None
+
+        brace_start = raw.find("{", action_start)
+        if brace_start == -1:
+            return None
+
+        brace_count = 0
+        for i in range(brace_start, len(raw)):
+            if raw[i] == "{":
+                brace_count += 1
+            elif raw[i] == "}":
+                brace_count -= 1
+                if brace_count == 0:
+                    return raw[brace_start:i+1]
+
+        return None

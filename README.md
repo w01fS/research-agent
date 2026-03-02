@@ -90,6 +90,27 @@ FinalReport --- ReportNote[Insight: Structured output enforces schema & determin
 - Actions will only become meaningful when tools/observations exist.  
 - Deterministic loop, parser, and AgentState provide safe, reproducible control.
 
+
+### Day 2 – Multi-Iteration Loop & Tool Integration
+
+**Objectives Completed:**
+
+- Refactored loop into `loop.py` with clear separation from `main.py`; main now acts as a lightweight facade.  
+- Verified OutputParser works end-to-end with structured THOUGHT, ACTION, FINAL parsing, including error handling for malformed or missing fields.  
+- Connected `search_local_knowledge` tool; simulated observation correctly stored in AgentState.  
+- Tested minimal prompt scenarios to validate loop, parser, and tool interactions without excessive delays.
+
+**Key Lessons:**
+
+- LLMs still attempt to shortcut to FINAL; iteration-based guardrails are essential for consistent ReAct behavior.  
+- Prompt complexity and model size directly affect local generation time; even first iteration can be slow with long prompts.  
+- AgentState updates (thoughts, actions, observations) must be deterministic and explicitly handled per iteration.  
+- Minimal prompts confirm structural correctness of loop and parser before introducing multi-step reasoning with real questions.
+
+---
+
+## Daily Cheat Sheets
+
 **Day 1 Cheat Sheet:**
 ```mermaid
 flowchart TD
@@ -117,5 +138,24 @@ B --- BN
 C --- CN
 D --- DN
 E --- EN
+```
+  
+  
+**Day 2 Cheat Sheet:**
+```mermaid
+flowchart TD
+    Q[Input Question / Topic] --> S[AgentState Initialized]
+    S --> P[Build Prompt with THOUGHT + Memory]
+    P --> L[LLM Call via OllamaClient.generate]
+    L --> R[Raw LLM Output]
+    R -->|Parse| O[OutputParser: THOUGHT / ACTION / FINAL / ERROR]
+    O --> C{Premature FINAL?}
+    C -->|Yes, Iteration 0| I[Reject FINAL, Increment Iteration]
+    C -->|No| U[Update AgentState: Add Thought, Action, Observation]
+    U --> T{Is FINAL Present?}
+    T -->|Yes| F[Terminate Agent, Set Final Answer]
+    T -->|No| N[Increment Iteration, Continue Loop]
+    F --> E[Return AgentState with Final Answer]
+    N --> P
 ```
 ---
