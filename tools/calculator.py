@@ -21,13 +21,33 @@ _UNARY_OPS = {
 
 class CalculatorTool(Tool):
     name = "calculator"
+    description = "Evaluates arithmetic expressions. Input should be a string expression like '2+2'."
 
-    def run(self, input_data: str) -> Union[float, str]:
+    def run(self, input_data: Union[str, Dict]) -> Union[float, str]:
         """
         Evaluates arithmetic expressions safely using AST.
         """
+        if isinstance(input_data, dict):
+            # Try to find the expression in common keys
+            expr_val = (
+                input_data.get("expression") or 
+                input_data.get("input") or 
+                input_data.get("query") or 
+                input_data.get("expr") or
+                input_data.get("q")
+            )
+            if expr_val:
+                input_data = str(expr_val)
+            else:
+                # If no known key, just try the first value if there's only one key
+                values = list(input_data.values())
+                if len(values) == 1:
+                    input_data = str(values[0])
+                else:
+                    return f"Calculator error: Could not find expression in input dict {input_data}"
+
         try:
-            expr = ast.parse(input_data, mode="eval").body
+            expr = ast.parse(str(input_data), mode="eval").body
             return self._eval(expr)
         except Exception as e:
             return f"Calculator error: {str(e)}"

@@ -15,7 +15,8 @@ def main():
     llm = OllamaClient(model="llama3.2:3b")
 
     # 3️⃣ Initialize agent state
-    question = "What is 2 + 2?"
+    # question = "What is 2 + 2?"
+    question = "what are the roadblocks to semiconductor supply chain?"
     state = AgentState(question=question)
 
     # 4️⃣ Create agent loop

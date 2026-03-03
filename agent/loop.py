@@ -2,6 +2,7 @@ from typing import Optional
 
 from .parser import OutputParser
 from .state import AgentState
+from .prompt import build_prompt
 from tools.registry import ToolRegistry
 
 
@@ -20,7 +21,7 @@ class AgentLoop:
         for iteration in range(self.max_iterations):
             print(f"\n--- Iteration {iteration + 1} ---")
 
-            prompt = state.build_prompt(initial_prompt, self.registry)
+            prompt = build_prompt(state, self.registry)
             raw_output = self.llm.generate(prompt)
 
             print("\nRAW LLM OUTPUT:\n", raw_output)
@@ -29,16 +30,17 @@ class AgentLoop:
 
             # Always log thought (parser guarantees string)
             state.add_thought(parsed.thought)
+            state.increment_iteration()
 
             if parsed.error:
-                error_msg = f"Parse error: {parsed.error}"
+                error_msg = f"SYSTEM ERROR: {parsed.error}"
                 print(error_msg)
                 state.add_observation(error_msg)
                 continue
 
             # FINAL branch
             if parsed.final:
-                if state.iteration == 0:
+                if state.iteration == 1:
                     print("Rejecting premature FINAL.")
                     continue
                 print(parsed.final)
@@ -46,13 +48,14 @@ class AgentLoop:
 
             # ACTION branch
             if parsed.action:
+                state.add_action(parsed.action)
                 tool_name = parsed.action["tool"]
                 tool_input = parsed.action["input"]
 
                 tool = self.registry.get(tool_name)
 
                 if not tool:
-                    error_msg = f"Unknown tool: {tool_name}"
+                    error_msg = f"SYSTEM ERROR: Unknown tool '{tool_name}'"
                     print(error_msg)
                     state.add_observation(error_msg)
                     continue
@@ -60,13 +63,13 @@ class AgentLoop:
                 try:
                     result = tool.run(tool_input)
                 except Exception as e:
-                    error_msg = f"Tool error: {str(e)}"
+                    error_msg = f"SYSTEM ERROR (Tool): {str(e)}"
                     print(error_msg)
                     state.add_observation(error_msg)
                     continue
 
-                print(f"Tool '{tool_name}' executed.")
-                print("OBSERVATION:", result)
+                print(f"SYSTEM: Tool '{tool_name}' executed.")
+                print("SYSTEM RESULT:", result)
 
                 state.add_observation(result)
                 continue
