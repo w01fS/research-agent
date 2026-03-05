@@ -3,31 +3,40 @@ from agent.state import AgentState
 from tools.registry import ToolRegistry
 from tools.calculator import CalculatorTool
 from tools.search_local import SearchLocalKnowledgeTool
-from agent.llm import OllamaClient  # new client
+from agent.llm import OllamaClient
+
 
 def main():
-    # 1️⃣ Initialize tool registry
+    # 1. Initialize tool registry
     registry = ToolRegistry()
     registry.register(CalculatorTool())
     registry.register(SearchLocalKnowledgeTool())
 
-    # 2️⃣ Initialize LLM client
+    # 2. Initialize LLM client
     llm = OllamaClient(model="llama3.2:3b")
 
-    # 3️⃣ Initialize agent state
-    # question = "What is 2 + 2?"
+    # 3. Initialize agent state
     question = "what are the roadblocks to semiconductor supply chain?"
+    # question = "what is 25 + 65?"
     state = AgentState(question=question)
 
-    # 4️⃣ Create agent loop
+    # 4. Create agent loop
     agent = AgentLoop(llm_client=llm, registry=registry, max_iterations=6)
 
-    # 5️⃣ Run the agent
-    final_answer = agent.run(initial_prompt=question, state=state)
+    # 5. Run the agent (returns final AgentState)
+    state = agent.run(state=state)
 
+    # 6. Report result based on FSM status
     print("\n========================")
-    print("FINAL ANSWER:")
-    print(final_answer)
+    if state.status == "FINISHED":
+        print("FINAL ANSWER:")
+        print(state.final_answer)
+    elif state.status == "ERROR":
+        print(f"AGENT ERROR: {state.error_reason}")
+    elif state.status == "MAX_ITER":
+        print(f"MAX ITERATIONS: {state.error_reason}")
+    else:
+        print(f"UNEXPECTED STATUS: {state.status}")
     print("========================")
 
 

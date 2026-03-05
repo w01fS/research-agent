@@ -1,90 +1,119 @@
+"""
+Strict JSON parser for LLM output.
+
+Enforces the JSON output contract:
+  - Tool action:   {"thought", "action_type": "tool", "tool_name", "tool_input"}
+  - Final answer:  {"thought", "action_type": "final_answer", "final_answer"}
+
+No regex fallbacks, no ast.literal_eval. Valid JSON or parse_error.
+"""
+
 import json
-import re
-from dataclasses import dataclass
-from typing import Optional
+
+# ---------------------------------------------------------------------------
+# Allowed schemas — used for key validation
+# ---------------------------------------------------------------------------
+_TOOL_KEYS = {"thought", "action_type", "tool_name", "tool_input"}
+_FINAL_KEYS = {"thought", "action_type", "final_answer"}
+_VALID_ACTION_TYPES = {"tool", "final_answer"}
 
 
-@dataclass
-class ParsedOutput:
-    thought: str
-    action: Optional[dict] = None
-    final: Optional[str] = None
-    error: Optional[str] = None
+def strict_json_parse(raw: str) -> dict:
+    """
+    Parse raw LLM output into a validated dict.
 
+    Rules:
+      - Must be valid JSON (no ast.literal_eval, no regex fallback)
+      - Must contain 'thought' (str) and 'action_type' (str)
+      - action_type == 'tool'         → requires 'tool_name' (str), 'tool_input' (dict)
+      - action_type == 'final_answer' → requires 'final_answer' (str)
+      - No extra keys allowed
+      - Any violation returns {"parse_error": "<reason>"}
+    """
+    # --- Step 1: extract JSON object from raw text ---
+    raw = raw.strip()
 
-class OutputParser:
+    # Strip markdown code fences if present (common LLM decoration)
+    if raw.startswith("```"):
+        lines = raw.split("\n")
+        # Remove first line (```json or ```) and last line (```)
+        if lines[-1].strip() == "```":
+            lines = lines[1:-1]
+        else:
+            lines = lines[1:]
+        raw = "\n".join(lines).strip()
 
-    def parse(self, raw: str) -> ParsedOutput:
-        thought = self._extract_section(raw, "THOUGHT") or ""
-        action_block = self._extract_json_block(raw)
-        final = self._extract_section(raw, "FINAL")
+    # Find first { and last matching }
+    brace_start = raw.find("{")
+    if brace_start == -1:
+        return {"parse_error": "No JSON object found in LLM output"}
 
-        if action_block and final:
-            return ParsedOutput(thought=thought, error="Both ACTION and FINAL present")
+    brace_count = 0
+    brace_end = -1
+    for i in range(brace_start, len(raw)):
+        if raw[i] == "{":
+            brace_count += 1
+        elif raw[i] == "}":
+            brace_count -= 1
+            if brace_count == 0:
+                brace_end = i
+                break
 
-        if not action_block and not final:
-            return ParsedOutput(thought=thought, error="Neither ACTION nor FINAL present")
+    if brace_end == -1:
+        return {"parse_error": "Unbalanced braces in LLM output"}
 
-        if action_block:
-            try:
-                action_json = json.loads(action_block)
-            except json.JSONDecodeError:
-                # Fallback: handle single quotes (common LLM error)
-                import ast
-                try:
-                    action_json = ast.literal_eval(action_block)
-                    if not isinstance(action_json, dict):
-                         return ParsedOutput(thought=thought, error="Malformed ACTION JSON")
-                except (ValueError, SyntaxError):
-                    return ParsedOutput(thought=thought, error="Malformed ACTION JSON")
+    json_str = raw[brace_start:brace_end + 1]
 
-            # 🔒 Schema validation
-            if "tool" not in action_json:
-                return ParsedOutput(thought=thought, error="ACTION missing 'tool' field")
+    # --- Step 2: parse JSON ---
+    try:
+        parsed = json.loads(json_str)
+    except json.JSONDecodeError as e:
+        return {"parse_error": f"Invalid JSON: {e}"}
 
-            if "input" not in action_json:
-                return ParsedOutput(thought=thought, error="ACTION missing 'input' field")
+    if not isinstance(parsed, dict):
+        return {"parse_error": "JSON root must be an object"}
 
-            if not isinstance(action_json["input"], dict):
-                return ParsedOutput(thought=thought, error="'input' must be a dict")
+    # --- Step 3: validate common required fields ---
+    if "thought" not in parsed:
+        return {"parse_error": "Missing required field: 'thought'"}
+    if not isinstance(parsed["thought"], str):
+        return {"parse_error": "'thought' must be a string"}
 
-            return ParsedOutput(thought=thought, action=action_json)
+    if "action_type" not in parsed:
+        return {"parse_error": "Missing required field: 'action_type'"}
+    if parsed["action_type"] not in _VALID_ACTION_TYPES:
+        return {
+            "parse_error": f"Invalid action_type: '{parsed['action_type']}'. "
+                           f"Must be one of {_VALID_ACTION_TYPES}"
+        }
 
-        return ParsedOutput(thought=thought, final=(final or "").strip())
+    # --- Step 4: validate per action_type ---
+    action_type = parsed["action_type"]
 
-    def _extract_section(self, raw: str, section: str) -> Optional[str]:
-        # Try with colon first (strict match)
-        pattern = rf"^{section}:\s*(.*?)(?=\n[A-Z]+[:\s]|\Z)"
-        match = re.search(pattern, raw, re.DOTALL | re.MULTILINE)
-        if match:
-            return match.group(1).strip() or None
+    if action_type == "tool":
+        # Check required tool-specific fields
+        if "tool_name" not in parsed:
+            return {"parse_error": "action_type 'tool' requires 'tool_name'"}
+        if not isinstance(parsed["tool_name"], str):
+            return {"parse_error": "'tool_name' must be a string"}
+        if "tool_input" not in parsed:
+            return {"parse_error": "action_type 'tool' requires 'tool_input'"}
+        if not isinstance(parsed["tool_input"], dict):
+            return {"parse_error": "'tool_input' must be a JSON object (dict)"}
 
-        # Fallback: match without colon (e.g. "FINAL some answer")
-        pattern_no_colon = rf"^{section}\s+(.*?)(?=\n[A-Z]+[:\s]|\Z)"
-        match = re.search(pattern_no_colon, raw, re.DOTALL | re.MULTILINE)
-        return match.group(1).strip() if match else None
+        # Check for extra keys
+        extra = set(parsed.keys()) - _TOOL_KEYS
+        if extra:
+            return {"parse_error": f"Unexpected keys for tool action: {extra}"}
 
-    def _extract_json_block(self, raw: str) -> Optional[str]:
-        action_start = raw.find("ACTION:")
-        if action_start == -1:
-            # Fallback: try matching "ACTION" without colon
-            action_match = re.search(r"^ACTION\s", raw, re.MULTILINE)
-            if action_match:
-                action_start = action_match.start()
-            else:
-                return None
+    elif action_type == "final_answer":
+        if "final_answer" not in parsed:
+            return {"parse_error": "action_type 'final_answer' requires 'final_answer'"}
+        if not isinstance(parsed["final_answer"], str):
+            return {"parse_error": "'final_answer' must be a string"}
 
-        brace_start = raw.find("{", action_start)
-        if brace_start == -1:
-            return None
+        extra = set(parsed.keys()) - _FINAL_KEYS
+        if extra:
+            return {"parse_error": f"Unexpected keys for final_answer: {extra}"}
 
-        brace_count = 0
-        for i in range(brace_start, len(raw)):
-            if raw[i] == "{":
-                brace_count += 1
-            elif raw[i] == "}":
-                brace_count -= 1
-                if brace_count == 0:
-                    return raw[brace_start:i+1]
-
-        return None
+    return parsed

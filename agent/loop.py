@@ -1,8 +1,7 @@
-from typing import Optional
-
-from .parser import OutputParser
 from .state import AgentState
 from .prompt import build_prompt
+from .parser import strict_json_parse
+from .fsm import transition, inject_observation
 from tools.registry import ToolRegistry
 
 
@@ -10,72 +9,48 @@ class AgentLoop:
     def __init__(self, llm_client, registry: ToolRegistry, max_iterations: int = 6):
         self.llm = llm_client
         self.registry = registry
-        self.parser = OutputParser()
         self.max_iterations = max_iterations
 
-    def run(self, initial_prompt: str, state: AgentState) -> str:
+    def run(self, state: AgentState) -> AgentState:
         """
-        Executes the deterministic ReAct loop.
+        FSM-driven agent loop.
+
+        Returns the final AgentState. Caller inspects state.status and
+        state.final_answer / state.error_reason.
         """
+        state.max_iterations = self.max_iterations
 
-        for iteration in range(self.max_iterations):
-            print(f"\n--- Iteration {iteration + 1} ---")
-
+        while state.status == "RUNNING":
             prompt = build_prompt(state, self.registry)
             raw_output = self.llm.generate(prompt)
 
-            print("\nRAW LLM OUTPUT:\n", raw_output)
+            print(f"\n--- Iteration {state.iteration + 1} ---")
+            print("RAW LLM OUTPUT:\n", raw_output)
 
-            parsed = self.parser.parse(raw_output)
+            parsed = strict_json_parse(raw_output)
+            state = transition(state, parsed, self.registry)
 
-            # Always log thought (parser guarantees string)
-            state.add_thought(parsed.thought)
-            state.increment_iteration()
+            if state.status != "RUNNING":
+                break
 
-            if parsed.error:
-                error_msg = f"SYSTEM ERROR: {parsed.error}"
-                print(error_msg)
-                state.add_observation(error_msg)
-                continue
+            # Tool execution happens AFTER transition, only if still RUNNING
+            if parsed.get("action_type") == "tool":
+                observation = _execute_tool(
+                    parsed["tool_name"], parsed["tool_input"], self.registry
+                )
+                state = inject_observation(state, observation)
+                print(f"TOOL '{parsed['tool_name']}' → {observation}")
 
-            # FINAL branch
-            if parsed.final:
-                if state.iteration == 1:
-                    print("Rejecting premature FINAL.")
-                    continue
-                print(parsed.final)
-                return parsed.final
+        return state
 
-            # ACTION branch
-            if parsed.action:
-                state.add_action(parsed.action)
-                tool_name = parsed.action["tool"]
-                tool_input = parsed.action["input"]
 
-                tool = self.registry.get(tool_name)
-
-                if not tool:
-                    error_msg = f"SYSTEM ERROR: Unknown tool '{tool_name}'"
-                    print(error_msg)
-                    state.add_observation(error_msg)
-                    continue
-
-                try:
-                    result = tool.run(tool_input)
-                except Exception as e:
-                    error_msg = f"SYSTEM ERROR (Tool): {str(e)}"
-                    print(error_msg)
-                    state.add_observation(error_msg)
-                    continue
-
-                print(f"SYSTEM: Tool '{tool_name}' executed.")
-                print("SYSTEM RESULT:", result)
-
-                state.add_observation(result)
-                continue
-
-        # If loop exits without FINAL
-        fallback = "Max iterations reached without FINAL."
-        print("\nFINAL ANSWER:")
-        print(fallback)
-        return fallback
+def _execute_tool(tool_name: str, tool_input: dict, registry: ToolRegistry) -> str:
+    """
+    Execute a tool and return its observation string.
+    Tool existence is already validated by transition().
+    """
+    tool = registry.get(tool_name)
+    try:
+        return tool.run(tool_input)
+    except Exception as e:
+        return f"Tool execution error: {str(e)}"
