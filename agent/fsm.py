@@ -35,42 +35,49 @@ def transition(state: AgentState, parsed_output: dict, registry: ToolRegistry) -
     # 2. Increment iteration
     state.iteration += 1
 
-    # 3. Max-iterations check
-    if state.iteration >= state.max_iterations:
-        state.status = "MAX_ITER"
-        state.error_reason = (
-            f"Reached maximum iterations ({state.max_iterations})"
-        )
-        return state
-
-    # 4. Parse error check
+    # 3. Parse error check
     if "parse_error" in parsed_output:
         state.status = "ERROR"
         state.error_reason = parsed_output["parse_error"]
         return state
 
-    # 5. Append thought
+    # 4. Append thought
     state.thoughts.append(parsed_output["thought"])
 
-    # 6. Final answer
+    # 5. Final answer — check this BEFORE max iterations
+    # (Allow the agent to finish on the last leg)
     if parsed_output["action_type"] == "final_answer":
         state.final_answer = parsed_output["final_answer"]
         state.status = "FINISHED"
         return state
 
-    # 7. Tool action
+    # 6. Max-iterations check for tool actions
+    # (Stop if we can't take more actions)
+    if state.iteration >= state.max_iterations:
+        state.status = "MAX_ITER"
+        state.error_reason = (
+            f"Reached maximum iterations ({state.max_iterations}) without final answer."
+        )
+        return state
+
+    # 7. Tool action & Loop detection
     if parsed_output["action_type"] == "tool":
         tool_name = parsed_output["tool_name"]
+        tool_input = parsed_output["tool_input"]
 
         if registry.get(tool_name) is None:
             state.status = "ERROR"
             state.error_reason = f"Unknown tool: '{tool_name}'"
             return state
 
-        state.actions.append({
-            "tool_name": tool_name,
-            "tool_input": parsed_output["tool_input"],
-        })
+        # Loop Detection: check if we've already done this exact call
+        current_action = {"tool_name": tool_name, "tool_input": tool_input}
+        if current_action in state.actions:
+            state.status = "ERROR"
+            state.error_reason = f"Loop detected: identical tool call repeated: {tool_name}({tool_input})"
+            return state
+
+        state.actions.append(current_action)
 
     return state
 

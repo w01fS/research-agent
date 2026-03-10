@@ -29,27 +29,27 @@ This project builds a **fully local autonomous research agent** in Python with z
 flowchart TD
 
 %% Core Components
-LLM[Local LLM - Generates THOUGHT + ACTION/FINAL]
-Parser[Parser - Validates schema & rejects malformed outputs]
-Runtime[Runtime / Loop - Iteration tracking, max cap, guards, logging]
+LLM[Local LLM - Generates JSON with THOUGHT + Action/Final]
+Parser[Strict JSON Parser - Validates schema & returns dict]
+FSM[FSM Runtime / Loop - Transitions state & detects loops]
 Tools[Tool Layer - Executes ACTIONs on local tools / simulations]
-AgentState[AgentState - Maintains ST memory & injects LT memory]
+AgentState[AgentState - Deterministic memory & state container]
 FAISS[Long-Term Memory - FAISS vector store]
 Reflection[Reflection / Critique - Evaluates previous steps]
 FinalReport[Final Report Generator - Structured JSON output]
 
 %% Data Flow
-LLM --> Parser --> Runtime --> AgentState --> Tools --> AgentState
+LLM --> Parser --> FSM --> AgentState --> Tools --> AgentState
 AgentState --> FAISS
 AgentState --> Reflection --> AgentState
 AgentState --> FinalReport
 FinalReport --> Output[Structured JSON Report]
 
 %% Notes (optional)
-LLM --- LLMNote[Insight: LLM is policy engine; cannot self-enforce multi-step reasoning]
-Runtime --- RuntimeNote[Lesson: Runtime ensures determinism and safe loop control]
-Tools --- ToolsNote[Note: Tools provide actionable environment; essential for multi-step reasoning]
-AgentState --- StateNote[Lesson: Centralized state supports deterministic transitions and memory injection]
+LLM --- LLMNote[Insight: Large context windows benefit from 'History at End' prompt patterns]
+Parser --- ParserNote[Lesson: Strict JSON parsing eliminates regex-based 'fuzzy' failures]
+FSM --- FSMNote[Runtime: Deterministic transitions provide safe loop control and cycle detection]
+AgentState --- StateNote[Architecture: State decoupling makes agent logic unit-testable]
 FAISS --- FAISSNote[Insight: Long-term vector memory persists knowledge across iterations]
 Reflection --- ReflectionNote[Lesson: Reflection step improves reasoning & error mitigation]
 FinalReport --- ReportNote[Insight: Structured output enforces schema & determinism]
@@ -61,10 +61,15 @@ FinalReport --- ReportNote[Insight: Structured output enforces schema & determin
 - **Separation of concerns:**  
   - LLM = policy engine  
   - Parser = validator  
-  - Runtime/Loop = controller/enforcer  
-  - AgentState = deterministic memory/state  
+  - FSM Transition = controller/state logic  
+  - AgentState = deterministic data container  
 
-- **Minimal prompt + runtime enforcement** ensures stability.  
+- **Guardrail Principles:**
+  - **Runtime > Prompt:** Determinism is enforced by code (FSM), not just by "wishing" in the prompt.
+  - **Absorbing States:** Once the agent enters FINISHED or ERROR, it stays there. No "ghost" iterations.
+  - **Circuit-Breakers:** Loop detection acts as a deterministic halt for hallucination cycles.
+  - **Instruction Salience:** Placing grounding data (History/Rules) at the generation point (prompt bottom) improves compliance in small models.
+
 - **Tool/environment dependencies** are required to motivate multi-step reasoning.  
 - **Parse errors and rejected outputs** are informative signals for agent design.
 
@@ -106,6 +111,24 @@ FinalReport --- ReportNote[Insight: Structured output enforces schema & determin
 - Prompt complexity and model size directly affect local generation time; even first iteration can be slow with long prompts.  
 - AgentState updates (thoughts, actions, observations) must be deterministic and explicitly handled per iteration.  
 - Minimal prompts confirm structural correctness of loop and parser before introducing multi-step reasoning with real questions.
+
+### Day 3 – Deterministic FSM & Strict JSON Contract
+
+**Objectives Completed:**
+
+- **Deterministic FSM Migration:** Replaced the fragile boolean-based `terminated` flag with a formal state machine (`RUNNING`, `FINISHED`, `ERROR`, `MAX_ITER`).
+- **Strict JSON Output Contract:** Enforced a zero-tolerance JSON schema for LLM outputs, eliminating regex-based "fuzzy" parsing.
+- **Cycle Detection (Loop Prevention):** Implemented runtime tracking of tool-call signatures to detect and terminate on "hallucination loops."
+- **Prompt Recency Optimization:** Reordered prompt structure to place **Conversation History** and **Stopping Criteria** at the very bottom, leveraging the LLM's recency bias for faster convergence.
+- **Refined Termination Logic:** Adjusted state transitions to allow successful finalization even on the final leg.
+
+**Key Lessons:**
+
+- **Absorbing States:** Formalizing terminal states ensures that once the agent leaves `RUNNING`, no further mutations or "ghost iterations" can occur.
+- **JSON as a Protocol:** Treating the LLM as a structured data provider rather than a text generator significantly increases reliability in small (3B) models.
+- **Hallucination Loop Countermeasures:** Autonomous agents are prone to repetitive reasoning cycles; runtime cycle detection is a mandatory "deterministic circuit-breaker" for production code.
+- **Instruction Salience:** Local LLMs have limited attention; placing critical grounding data (History/Rules) at the end of the prompt (the "generation point") dramatically improves instruction following.
+- **Pure Function Core:** By moving state mutation into a pure `transition()` function, the agent's logic becomes fully testable and decoupled from the non-deterministic LLM client.
 
 ---
 
@@ -158,4 +181,59 @@ flowchart TD
     F --> E[Return AgentState with Final Answer]
     N --> P
 ```
+
+**Day 3 Cheat Sheet (Decoupled Pipeline):**
+```mermaid
+flowchart LR
+    subgraph Input
+        S[AgentState] --> P[Prompt Builder]
+    end
+    
+    subgraph Generation
+        P --> LLM[Ollama Client]
+    end
+
+    subgraph FSM_Logic
+        LLM --> Parser[JSON Parser]
+        Parser -->|Validated Dict| Transition[FSM Transition]
+    end
+
+    subgraph Side_Effects
+        Transition -->|RUNNING + Tool| Tool[Tool Execution]
+        Tool --> Inject[Observation Injection]
+        Inject --> S
+    end
+
+    Transition -->|FINISHED/ERROR/MAX_ITER| Exit[Terminal State]
+```
+
+**Day 3 State Transitions:**
+```mermaid
+stateDiagram-v2
+    [*] --> RUNNING: Question Received
+    
+    state RUNNING {
+        direction lr
+        T: transition()
+        I: inject_observation()
+        T --> I: action_type == 'tool'
+        I --> T: Loop continues
+    }
+    
+    RUNNING --> FINISHED: transition() -> status changed
+    RUNNING --> ERROR: Parse Error / Loop Detected / Unknown Tool
+    RUNNING --> MAX_ITER: iteration >= max_iterations
+    
+    FINISHED --> [*]
+    ERROR --> [*]
+    MAX_ITER --> [*]
+    
+    note right of RUNNING
+       Guards:
+       1. Strict JSON Parse
+       2. Cycle Detection
+       3. Schema Validation
+    end note
+```
+---
 ---
