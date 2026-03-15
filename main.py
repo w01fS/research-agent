@@ -4,6 +4,8 @@ from tools.registry import ToolRegistry
 from tools.calculator import CalculatorTool
 from tools.search_local import SearchLocalKnowledgeTool
 from agent.llm import OllamaClient
+from memory.embedding import EmbeddingModel
+from memory.vector_store import VectorMemory
 
 
 def main():
@@ -15,18 +17,30 @@ def main():
     # 2. Initialize LLM client
     llm = OllamaClient(model="llama3.2:3b")
 
-    # 3. Initialize agent state
-    question = "what are the roadblocks to semiconductor supply chain?"
-    # question = "what is 25 + 65?"
+    # 3. Initialize embedding model and vector memory
+    print("Loading embedding model...")
+    embedder = EmbeddingModel()
+    memory = VectorMemory(dim=384, storage_dir="data")
+    print("Embedding model ready.")
+
+    # 4. Initialize agent state
+    # question = "what are the dependencies of semiconductor supply chain?"
+    question = "what is 25 + 65?"
     state = AgentState(question=question)
 
-    # 4. Create agent loop
-    agent = AgentLoop(llm_client=llm, registry=registry, max_iterations=6)
+    # 5. Create agent loop
+    agent = AgentLoop(
+        llm_client=llm,
+        registry=registry,
+        embedder=embedder,
+        memory=memory,
+        max_iterations=6,
+    )
 
-    # 5. Run the agent (returns final AgentState)
+    # 6. Run the agent (returns final AgentState)
     state = agent.run(state=state)
 
-    # 6. Report result based on FSM status
+    # 7. Report result based on FSM status
     print("\n========================")
     if state.status == "FINISHED":
         print("FINAL ANSWER:")
@@ -37,6 +51,11 @@ def main():
         print(f"MAX ITERATIONS: {state.error_reason}")
     else:
         print(f"UNEXPECTED STATUS: {state.status}")
+
+    # Summary stats
+    print(f"\nIterations: {state.iteration}")
+    print(f"Reflections: {len(state.reflections)}")
+    print(f"Memories stored: {memory.index.ntotal}")
     print("========================")
 
 

@@ -8,8 +8,10 @@ class AgentState:
     thoughts: List[str] = field(default_factory=list)
     observations: List[str] = field(default_factory=list)
     actions: List[dict] = field(default_factory=list)
+    reflections: List[str] = field(default_factory=list)
     final_answer: Optional[str] = None
     iteration: int = 0
     max_iterations: int = 6
     status: str = "RUNNING"            # RUNNING | FINISHED | ERROR | MAX_ITER
+    fsm_phase: str = "THINK"           # THINK | ACT | OBSERVE | REFLECT | DECIDE
     error_reason: Optional[str] = None
