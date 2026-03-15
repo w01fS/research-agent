@@ -130,6 +130,31 @@ FinalReport --- ReportNote[Insight: Structured output enforces schema & determin
 - **Instruction Salience:** Local LLMs have limited attention; placing critical grounding data (History/Rules) at the end of the prompt (the "generation point") dramatically improves instruction following.
 - **Pure Function Core:** By moving state mutation into a pure `transition()` function, the agent's logic becomes fully testable and decoupled from the non-deterministic LLM client.
 
+
+### Day 4 – Reflection Stage & FAISS Vector Memory
+
+**Objectives Completed:**
+
+- **FSM Extended to 6 States:** `THINK → ACT → OBSERVE → REFLECT → DECIDE → THINK | STOP`. Reflection is an explicit FSM state, not embedded inside THINK.
+- **Reflection/Self-Critique:** Added `agent/reflection.py` with `strict_reflection_parse()` enforcing `{"critique", "decision", "store_memory"}` JSON contract. LLM critiques each reasoning step before deciding to continue, search again, or stop.
+- **FAISS Vector Memory:** Implemented `memory/vector_store.py` (`VectorMemory`) with `IndexFlatL2` and parallel `documents[]` list. Supports `add()` with deduplication and `search()` with `k=3`.
+- **Local Embedding Pipeline:** `memory/embedding.py` wraps `sentence-transformers/all-MiniLM-L6-v2` (384-dim). No remote APIs.
+- **Memory Persistence:** FAISS index + documents list saved to `data/memory.faiss` and `data/memory.json` after every write. Loaded at init if files exist — true long-term memory across runs.
+- **Memory Retrieval Injection:** Before each THINK step, the research question + latest thought are embedded and top-3 memories are injected into the prompt context.
+- **Memory Write Policy:** LLM proposes `store_memory: true/false`; the loop enforces deterministically. Error observations and duplicates are never stored.
+- **Observation-Level Duplicate Detection:** Tools returning the same observation as a previous call trigger a `[DUPLICATE]` warning, nudging the LLM to change approach.
+- **Dual-Phase FSM Tracking:** `fsm_phase` (THINK/ACT/OBSERVE/REFLECT/DECIDE) tracks position within an iteration, orthogonal to `status` (RUNNING/FINISHED/ERROR/MAX_ITER) which controls loop termination.
+
+**Key Lessons:**
+
+- **Recency Bias is Real:** Small LLMs pay most attention to the end of the prompt. Critical context (question, known facts, stopping criteria) must be at the bottom, not the top. Format examples and rules go at the top as reference material.
+- **Memory Without Persistence is Pointless:** An in-memory-only vector store provides no value across runs. FAISS `write_index`/`read_index` + JSON document persistence is the minimum viable approach.
+- **Observation-Level Guards > Input-Level Guards:** Tool-input loop detection misses cases where different inputs produce identical outputs (e.g., different substrings matching the same KB entry). Checking observation equality catches this.
+- **FAISS Index Boundary Gotcha:** FAISS uses `-1` as a sentinel for "no more results" when `k > n_docs`. Python negative indexing silently wraps around instead of erroring — always guard with `idx >= 0`.
+- **Reflection Needs Separation:** Making reflection an explicit FSM state (not embedded in THINK) keeps the JSON contracts clean and makes each phase independently testable.
+- **Type Assumptions Kill:** When multiple tools return different types (str vs int vs dict), any code touching observations must handle polymorphic returns. The `Tool.run()` contract says `-> str` but implementations don't always comply.
+- **Prompt Engineering for Small Models is Architecture:** For 3B models, prompt wording changes alone often fail. Effective "prompt engineering" means restructuring *what information appears where* and adding *architectural guardrails* (observation dedup, memory dedup) rather than hoping the model follows instructions.
+
 ---
 
 ## Daily Cheat Sheets
@@ -235,5 +260,76 @@ stateDiagram-v2
        3. Schema Validation
     end note
 ```
----
+
+
+**Day 4 Cheat Sheet (Full FSM with Reflection & Memory):**
+```mermaid
+flowchart TD
+    Q[Research Question] --> E[Embed Question + Latest Thought]
+    E --> MR[FAISS Search: Top-3 Memories]
+    MR --> TP[Build Think Prompt with Memories]
+    
+    TP --> THINK[THINK: LLM Generates Action]
+    THINK --> PARSE[Strict JSON Parse]
+    PARSE --> TR[transition: Validate & Mutate State]
+    
+    TR -->|final_answer| DONE[FINISHED]
+    TR -->|tool action| ACT[ACT: Execute Tool]
+    
+    ACT --> DUP{Duplicate Observation?}
+    DUP -->|Yes| WARN["[DUPLICATE] Warning Injected"]
+    DUP -->|No| OBS[OBSERVE: Store Result]
+    WARN --> OBS
+    
+    OBS --> REFLECT[REFLECT: LLM Critiques Step]
+    REFLECT --> RPARSE[Strict Reflection Parse]
+    RPARSE --> DECIDE[DECIDE: reflect_transition]
+    
+    DECIDE -->|stop| SYNTH[Synthesize Final Answer]
+    DECIDE -->|continue / search_again| MW{store_memory?}
+    
+    MW -->|true + not error + not duplicate| STORE[FAISS Add + Disk Save]
+    MW -->|false| SKIP[Skip Memory Write]
+    
+    STORE --> E
+    SKIP --> E
+    SYNTH --> DONE
+```
+
+**Day 4 State Transitions:**
+```mermaid
+stateDiagram-v2
+    [*] --> THINK: Question Received
+
+    THINK --> ACT: action_type == tool
+    THINK --> FINISHED: action_type == final_answer
+    THINK --> ERROR: Parse Error / Loop Detected
+    THINK --> MAX_ITER: iteration >= max
+
+    ACT --> OBSERVE: Tool Executed
+    OBSERVE --> REFLECT: Observation Stored
+
+    REFLECT --> DECIDE: Critique Parsed
+    REFLECT --> ERROR: Reflection Parse Error
+
+    DECIDE --> THINK: continue / search_again
+    DECIDE --> FINISHED: stop
+
+    FINISHED --> [*]
+    ERROR --> [*]
+    MAX_ITER --> [*]
+
+    note right of REFLECT
+       Reflection JSON:
+       critique, decision,
+       store_memory
+    end note
+
+    note left of DECIDE
+       Memory Write:
+       Only if store_memory=true
+       AND not error obs
+       AND not duplicate
+    end note
+```
 ---
